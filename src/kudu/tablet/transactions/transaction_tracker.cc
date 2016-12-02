@@ -21,7 +21,7 @@
 #include <limits>
 #include <vector>
 
-
+#include "kudu/consensus/time_manager.h"
 #include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/tablet/tablet_peer.h"

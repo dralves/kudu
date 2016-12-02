@@ -298,7 +298,11 @@ TEST_F(LinkedListTest, TestLoadWhileOneServerDownAndVerify) {
 
   cluster_->tablet_server(1)->Shutdown();
   cluster_->tablet_server(2)->Shutdown();
-  ASSERT_OK(tester_->WaitAndVerify(FLAGS_seconds_to_run, written));
+
+  // Finish the verification with a READ_LATEST scan since the majority of the cluster is down.
+  ASSERT_OK(tester_->WaitAndVerify(FLAGS_seconds_to_run,
+                                   written,
+                                   LinkedListTester::FINISH_WITH_SCAN_LATEST));
 }
 
 } // namespace kudu

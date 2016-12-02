@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 
+#include "kudu/consensus/time_manager.h"
 #include "kudu/gutil/strings/substitute.h"
 #include "kudu/tablet/tablet_metrics.h"
 #include "kudu/util/flag_tags.h"

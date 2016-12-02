@@ -636,7 +636,7 @@ TEST_F(ConsistencyITest, TestScanTokenTimestampPropagation) {
 
     // Insert a single row into the second tablet: it's necessary to get
     // non-empty scan in the verification phase of the test.
-    ASSERT_OK(InsertTestRows(client.get(), table.get(), 1, key_split_value_));
+    ASSERT_OK(InsertTestRows(client.get(), table.get(), 3, key_split_value_));
   }
 
   uint64_t ts_ref;

@@ -20,6 +20,7 @@
 #include "kudu/tablet/transactions/alter_schema_transaction.h"
 
 #include "kudu/common/wire_protocol.h"
+#include "kudu/consensus/time_manager.h"
 #include "kudu/rpc/rpc_context.h"
 #include "kudu/server/hybrid_clock.h"
 #include "kudu/tablet/tablet.h"
@@ -96,9 +97,9 @@ Status AlterSchemaTransaction::Prepare() {
 }
 
 Status AlterSchemaTransaction::Start() {
-  if (!state_->has_timestamp()) {
-    state_->set_timestamp(state_->tablet_peer()->clock()->Now());
-  }
+  DCHECK(!state_->has_timestamp());
+  DCHECK(state_->consensus_round()->replicate_msg()->has_timestamp());
+  state_->set_timestamp(Timestamp(state_->consensus_round()->replicate_msg()->timestamp()));
   TRACE("START. Timestamp: $0", server::HybridClock::GetPhysicalValueMicros(state_->timestamp()));
   return Status::OK();
 }

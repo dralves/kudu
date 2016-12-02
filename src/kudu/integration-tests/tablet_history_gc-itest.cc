@@ -661,7 +661,8 @@ TEST_F(RandomizedTabletHistoryGcITest, TestRandomHistoryGCWorkload) {
 
         unique_ptr<client::KuduScanner> scanner(new KuduScanner(table.get()));
         ASSERT_OK(scanner->SetReadMode(KuduScanner::READ_AT_SNAPSHOT));
-        ASSERT_OK(scanner->SetOrderMode(KuduScanner::ORDERED));
+        ASSERT_OK(scanner->SetFaultTolerant();
+        ASSERT_OK(scanner->SetTimeoutMillis(60 * 1000));
         ASSERT_OK(scanner->SetSnapshotRaw(snapshot_ts.ToUint64()));
         ASSERT_OK(scanner->Open());
 

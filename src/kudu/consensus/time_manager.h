@@ -16,6 +16,7 @@
 // under the License.
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -113,6 +114,7 @@ class TimeManager : public RefCountedThreadSafe<TimeManager> {
   //
   // Returns Status::OK() if it safe time advanced past 'timestamp' before 'deadline'
   // Returns Status::TimeOut() if deadline elapsed without safe time moving enough.
+  // Returns Status::ServiceUnavailable() is the request should be retried somewhere else.
   //
   // TODO(KUDU-1127) make this return another status if safe time is too far back in the past
   // or hasn't moved in a long time.
@@ -127,6 +129,20 @@ class TimeManager : public RefCountedThreadSafe<TimeManager> {
  private:
   FRIEND_TEST(TimeManagerTest, TestTimeManagerNonLeaderMode);
   FRIEND_TEST(TimeManagerTest, TestTimeManagerLeaderMode);
+
+  // Returns whether we've advanced safe time recently.
+  // If this returns false we might be partitioned or there might be election churn.
+  // The client should try again.
+  // If this returns false, sets error information in 'error_message'.
+  bool HasAdvancedSafeTimeRecentlyUnlocked(std::string* error_message);
+
+  // Returns whether safe time is lagging too much behind 'timestamp' and the client
+  // should be forced to retry.
+  // If this returns true, sets error information in 'error_message'.
+  bool IsSafeTimeLaggingUnlocked(Timestamp timestamp, std::string* error_message);
+
+  // Helper to build the final error message of WaitUntilSafe().
+  void MakeWaiterTimeoutMessageUnlocked(Timestamp timestmap, std::string* error_message);
 
   // Helper to return the external consistency mode of 'message'.
   static ExternalConsistencyMode GetMessageConsistencyMode(const ReplicateMsg& message);
@@ -176,6 +192,10 @@ class TimeManager : public RefCountedThreadSafe<TimeManager> {
   // On replicas this is the latest safe time received from the leader, on the leader this is
   // the last serial timestamp appended to the queue.
   Timestamp last_safe_ts_;
+
+  // The last time we advanced safe time.
+  // Used in the decision of whether we should have waiters wait or try again.
+  MonoTime last_advanced_safe_time_;
 
   // The current mode of the TimeManager.
   Mode mode_;

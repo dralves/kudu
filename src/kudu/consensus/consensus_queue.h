@@ -31,6 +31,7 @@
 #include "kudu/consensus/log_util.h"
 #include "kudu/consensus/opid_util.h"
 #include "kudu/consensus/ref_counted_replicate.h"
+//#include "kudu/consensus/time_manager.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/util/locks.h"
 #include "kudu/util/logging.h"
@@ -49,6 +50,7 @@ class Log;
 
 namespace consensus {
 class PeerMessageQueueObserver;
+class TimeManager;
 
 // The id for the server-wide consensus queue MemTracker.
 extern const char kConsensusQueueParentTrackerId[];
@@ -129,6 +131,7 @@ class PeerMessageQueue {
 
   PeerMessageQueue(const scoped_refptr<MetricEntity>& metric_entity,
                    const scoped_refptr<log::Log>& log,
+                   scoped_refptr<TimeManager> time_manager,
                    const RaftPeerPB& local_peer_pb,
                    const std::string& tablet_id);
 
@@ -429,6 +432,8 @@ class PeerMessageQueue {
   LogCache log_cache_;
 
   Metrics metrics_;
+
+  scoped_refptr<TimeManager> time_manager_;
 };
 
 // The interface between RaftConsensus and the PeerMessageQueue.

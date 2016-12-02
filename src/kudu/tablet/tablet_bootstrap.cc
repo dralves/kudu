@@ -34,6 +34,7 @@
 #include "kudu/consensus/log_util.h"
 #include "kudu/consensus/metadata.pb.h"
 #include "kudu/consensus/opid_util.h"
+#include "kudu/consensus/time_manager.h"
 #include "kudu/fs/fs_manager.h"
 #include "kudu/gutil/ref_counted.h"
 #include "kudu/gutil/stl_util.h"
@@ -498,9 +499,6 @@ Status TabletBootstrap::Bootstrap(shared_ptr<Tablet>* rebuilt_tablet,
                                            tablet_id));
   }
 
-  // Before playing any segments we set the safe and clean times to 'kMin' so that
-  // the MvccManager will accept all transactions that we replay as uncommitted.
-  tablet_->mvcc_manager()->AdjustSafeTime(Timestamp::kMin);
   RETURN_NOT_OK_PREPEND(PlaySegments(consensus_info), "Failed log replay. Reason");
 
   // Flush the consensus metadata once at the end to persist our changes, if any.

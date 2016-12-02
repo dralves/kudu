@@ -56,7 +56,7 @@ void ScanTableToStrings(KuduTable* table, vector<string>* row_strings) {
   row_strings->clear();
   KuduScanner scanner(table);
   ASSERT_OK(scanner.SetSelection(KuduClient::LEADER_ONLY));
-  ASSERT_OK(scanner.SetTimeoutMillis(60000));
+  ASSERT_OK(scanner.SetTimeoutMillis(5000));
   ScanToStrings(&scanner, row_strings);
 }
 
