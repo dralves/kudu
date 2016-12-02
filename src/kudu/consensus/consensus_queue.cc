@@ -452,6 +452,8 @@ Status PeerMessageQueue::RequestForPeer(const string& uuid,
      request->set_safe_timestamp(time_manager_->GetSafeTime().value());
   }
 
+  // TODO(dralves) set the safe time on the request here.
+
   if (PREDICT_FALSE(VLOG_IS_ON(2))) {
     if (request->ops_size() > 0) {
       VLOG_WITH_PREFIX_UNLOCKED(2) << "Sending request with operations to Peer: " << uuid
