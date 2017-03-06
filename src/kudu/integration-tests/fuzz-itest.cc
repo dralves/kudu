@@ -53,6 +53,7 @@ DECLARE_bool(use_hybrid_clock);
 // the fuzz test.
 enum TestOpType {
   TEST_INSERT,
+  TEST_INSERT_PK_ONLY,
   TEST_UPSERT,
   TEST_UPSERT_PK_ONLY,
   TEST_UPDATE,
@@ -101,6 +102,7 @@ namespace tablet {
 
 const char* TestOpType_names[] = {
   "TEST_INSERT",
+  "TEST_INSERT_PK_ONLY",
   "TEST_UPSERT",
   "TEST_UPSERT_PK_ONLY",
   "TEST_UPDATE",
@@ -211,7 +213,7 @@ class FuzzTest : public KuduTest {
                                         TestOpType type) {
     ExpectedKeyValueRow ret;
     unique_ptr<KuduWriteOperation> op;
-    if (type == TEST_INSERT) {
+    if (type == TEST_INSERT) { //|| type == TEST_INSERT_PK_ONLY) {
       op.reset(table_->NewInsert());
     } else {
       op.reset(table_->NewUpsert());
@@ -219,17 +221,26 @@ class FuzzTest : public KuduTest {
     KuduPartialRow* row = op->mutable_row();
     CHECK_OK(row->SetInt32(0, key));
     ret.key = key;
-    if (type != TEST_UPSERT_PK_ONLY) {
-      if (val & 1) {
-        CHECK_OK(row->SetNull(1));
-      } else {
-        CHECK_OK(row->SetInt32(1, val));
-        ret.val = val;
+    switch (type) {
+      case TEST_INSERT:
+      case TEST_UPSERT: {
+        if (val & 1) {
+          CHECK_OK(row->SetNull(1));
+        } else {
+          CHECK_OK(row->SetInt32(1, val));
+          ret.val = val;
+        }
+        break;
       }
-    } else {
-      // For "upsert PK only", we expect the row to keep its old value
-      // the row existed, or NULL if there was no old row.
-      ret.val = old_row ? old_row->val : boost::none;
+      case TEST_INSERT_PK_ONLY:
+        break;
+      case TEST_UPSERT_PK_ONLY: {
+        // For "upsert PK only", we expect the row to keep its old value
+        // the row existed, or NULL if there was no old row.
+        ret.val = old_row ? old_row->val : boost::none;
+        break;
+      }
+      default: LOG(FATAL) << "Invalic test op type: " << TestOpType_names[type];
     }
     CHECK_OK(session_->Apply(op.release()));
     return ret;
@@ -393,9 +404,35 @@ class FuzzTest : public KuduTest {
   scoped_refptr<TabletPeer> tablet_peer_;
 };
 
+enum TestOpSets {
+  ALL,
+  PK_ONLY
+};
+
+TestOpType PickOpAtRandom(TestOpSets sets) {
+  while (true) {
+    TestOpType type = tight_enum_cast<TestOpType>(
+        rand() % enum_limits<TestOpType>::max_enumerator);
+    switch (sets) {
+      case ALL:
+        return type;
+      case PK_ONLY: {
+        switch (type) {
+          case TEST_INSERT:
+          case TEST_UPDATE:
+          case TEST_UPSERT:
+            continue;
+          default:
+            return type;
+        }
+      }
+    }
+  }
+}
+
 // Generate a random valid sequence of operations for use as a
 // fuzz test.
-void GenerateTestCase(vector<TestOp>* ops, int len) {
+void GenerateTestCase(vector<TestOp>* ops, int len, TestOpSets sets = ALL) {
   vector<bool> exists(FLAGS_keyspace_size);
   int op_timestamps = 0;
   bool ops_pending = false;
@@ -404,12 +441,19 @@ void GenerateTestCase(vector<TestOp>* ops, int len) {
   bool data_in_dms = false;
   ops->clear();
   while (ops->size() < len) {
-    TestOpType r = tight_enum_cast<TestOpType>(rand() % enum_limits<TestOpType>::max_enumerator);
+    TestOpType r = PickOpAtRandom(sets);
     int row_key = rand() % FLAGS_keyspace_size;
     switch (r) {
       case TEST_INSERT:
         if (exists[row_key]) continue;
         ops->push_back({TEST_INSERT, row_key});
+        exists[row_key] = true;
+        ops_pending = true;
+        data_in_mrs = true;
+        break;
+      case TEST_INSERT_PK_ONLY:
+        if (exists[row_key]) continue;
+        ops->push_back({TEST_INSERT_PK_ONLY, row_key});
         exists[row_key] = true;
         ops_pending = true;
         data_in_mrs = true;
@@ -543,6 +587,7 @@ void FuzzTest::RunFuzzCase(const vector<TestOp>& test_ops,
   for (const TestOp& test_op : test_ops) {
     switch (test_op.type) {
       case TEST_INSERT:
+      case TEST_INSERT_PK_ONLY:
       case TEST_UPSERT:
       case TEST_UPSERT_PK_ONLY:
       case TEST_UPDATE:
@@ -555,6 +600,7 @@ void FuzzTest::RunFuzzCase(const vector<TestOp>& test_ops,
     LOG(INFO) << test_op.ToString();
     switch (test_op.type) {
       case TEST_INSERT:
+      case TEST_INSERT_PK_ONLY:
       case TEST_UPSERT:
       case TEST_UPSERT_PK_ONLY: {
         pending_val[test_op.val] = InsertOrUpsertRow(
@@ -607,6 +653,16 @@ void FuzzTest::RunFuzzCase(const vector<TestOp>& test_ops,
         LOG(FATAL) << test_op.type;
     }
   }
+}
+
+// Generates a random test sequence and runs it.
+// The logs of this test are designed to easily be copy-pasted and create
+// more specific test cases like TestFuzz<N> below.
+TEST_F(FuzzTest, TestRandomFuzzPksOnly) {
+  SeedRandom();
+  vector<TestOp> test_ops;
+  GenerateTestCase(&test_ops, AllowSlowTests() ? 1000 : 50, TestOpSets::PK_ONLY);
+  RunFuzzCase(test_ops);
 }
 
 // Generates a random test sequence and runs it.
@@ -849,6 +905,305 @@ TEST_F(FuzzTest, TestUpsert_PKOnly) {
       {TEST_FLUSH_OPS, 0},
       {TEST_RESTART_TS, 0}
     });
+}
+
+TEST_F(FuzzTest, TestDeltaCrash) {
+  RunFuzzCase({
+      {TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_DELETE, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 2},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 2},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 2},
+{TEST_RESTART_TS, 0},
+{TEST_DELETE, 1},
+{TEST_SCAN_AT_TIMESTAMP, 3},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_INSERT_PK_ONLY, 1},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 3},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_DELETE, 0},
+{TEST_RESTART_TS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_INSERT_PK_ONLY, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_COMPACT_TABLET, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_COMPACT_TABLET, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_DELETE, 0},
+{TEST_DELETE, 1},
+{TEST_INSERT_PK_ONLY, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_DELETE, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 3},
+{TEST_SCAN_AT_TIMESTAMP, 2},
+{TEST_FLUSH_OPS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_INSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_SCAN_AT_TIMESTAMP, 4},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_DELETE, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 3},
+{TEST_RESTART_TS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 5},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 7},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 5},
+{TEST_SCAN_AT_TIMESTAMP, 2},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_DELETE, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_INSERT_PK_ONLY, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_COMPACT_TABLET, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_COMPACT_TABLET, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_DELETE, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_DELETE, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_INSERT_PK_ONLY, 1},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_DELETE, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_COMPACT_TABLET, 0},
+{TEST_DELETE, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_INSERT_PK_ONLY, 1},
+{TEST_RESTART_TS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_SCAN_AT_TIMESTAMP, 11},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_DELETE, 0},
+{TEST_RESTART_TS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 6},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_FLUSH_TABLET, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_DELETE, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 4},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_FLUSH_OPS, 0},
+{TEST_COMPACT_TABLET, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 2},
+{TEST_SCAN_AT_TIMESTAMP, 11},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_DELETE, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_SCAN_AT_TIMESTAMP, 5},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_INSERT_PK_ONLY, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_RESTART_TS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 9},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 8},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_DELETE, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_DELETE, 1},
+{TEST_INSERT_PK_ONLY, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 5},
+{TEST_RESTART_TS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 5},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_COMPACT_TABLET, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_DELETE, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_INSERT_PK_ONLY, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_RESTART_TS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 11},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_TABLET, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_SCAN_AT_TIMESTAMP, 1},
+{TEST_COMPACT_TABLET, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_DELETE, 1},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_INSERT_PK_ONLY, 1},
+{TEST_UPSERT_PK_ONLY, 1},
+{TEST_DELETE, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_MINOR_COMPACT_DELTAS, 0},
+{TEST_FLUSH_OPS, 0},
+{TEST_FLUSH_DELTAS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_RESTART_TS, 0},
+{TEST_RESTART_TS, 0},
+{TEST_MAJOR_COMPACT_DELTAS, 0},
+{TEST_UPSERT_PK_ONLY, 0},
+{TEST_SCAN_AT_TIMESTAMP, 9}
+     });
 }
 
 } // namespace tablet
